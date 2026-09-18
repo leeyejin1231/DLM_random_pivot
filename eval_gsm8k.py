@@ -10,12 +10,31 @@ from pathlib import Path
 
 import torch
 import transformers
-from datasets import Dataset
+try:
+    from datasets import Dataset
+except ImportError:  # Read the cached Arrow stream directly when datasets is not installed.
+    import pyarrow as pa
+
+    class Dataset:
+        def __init__(self, table):
+            self._rows = table.to_pylist()
+
+        @classmethod
+        def from_file(cls, path):
+            with pa.memory_map(path) as source:
+                return cls(pa.ipc.open_stream(source).read_all())
+
+        def __len__(self):
+            return len(self._rows)
+
+        def __getitem__(self, index):
+            return self._rows[index]
 from transformers import AutoModel, AutoTokenizer
 
 from decode import generate
 from hierarchy_decode import generate_hierarchy
 from decode_confidence import generate as generate_confidence_pivot
+from decode_confidence_v2 import generate as generate_confidence_pivot_v2
 
 
 NUMBER = r"[-+]?(?:\d[\d,]*(?:\.\d+)?|\.\d+)"
@@ -75,7 +94,7 @@ def summarize(rows):
                 'final_tokens_per_step': net / steps,
             })
         if all('decoder_stats' in r for r in subset):
-            for diagnostic in ('deferred', 'fallback', 'forced'):
+            for diagnostic in ('deferred', 'fallback', 'forced', 'bulk_intervals', 'bulk_tokens'):
                 summary[mode][f'{diagnostic}_pivots'] = sum(
                     sum(sum(counts) for counts in r['decoder_stats'].get(f'{diagnostic}_per_step', []))
                     for r in subset)
@@ -154,6 +173,7 @@ def main():
         'decode_sha256': hashlib.sha256(Path(__file__).with_name('decode.py').read_bytes()).hexdigest(),
         'hierarchy_decode_sha256': hashlib.sha256(Path(__file__).with_name('hierarchy_decode.py').read_bytes()).hexdigest(),
         'decode_confidence_sha256': hashlib.sha256(Path(__file__).with_name('decode_confidence.py').read_bytes()).hexdigest(),
+        'decode_confidence_v2_sha256': hashlib.sha256(Path(__file__).with_name('decode_confidence_v2.py').read_bytes()).hexdigest(),
         'eval_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         'metrics': {
             'accuracy': 'Last #### numeric answer, falling back to last number; numeric equality.',
@@ -171,7 +191,7 @@ def main():
     write_json(config_path, config)
     source_dir = out_dir / 'source'
     source_dir.mkdir(exist_ok=True)
-    for filename in ('decode.py', 'hierarchy_decode.py', 'decode_confidence.py', 'eval_gsm8k.py'):
+    for filename in ('decode.py', 'hierarchy_decode.py', 'decode_confidence.py', 'decode_confidence_v2.py', 'eval_gsm8k.py'):
         (source_dir / filename).write_bytes(Path(__file__).with_name(filename).read_bytes())
     write_json(out_dir / 'samples.json', [{'test_index': i, **dataset[i]} for i in indices])
     records_path = out_dir / 'results.jsonl'
@@ -199,7 +219,8 @@ def main():
         kwargs = dict(variants[mode])
         remasking = kwargs.pop('remasking')
         decoder = {'hierarchy': generate_hierarchy,
-                   'confidence_pivot': generate_confidence_pivot}.get(remasking, generate)
+                   'confidence_pivot': generate_confidence_pivot,
+                   'confidence_pivot_v2': generate_confidence_pivot_v2}.get(remasking, generate)
         if decoder is generate:
             kwargs['remasking'] = remasking
         return decoder(model, encoded['input_ids'], attention_mask=encoded['attention_mask'],
