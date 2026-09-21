@@ -218,8 +218,6 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True, local_files_only=True)
     uses_wino = any(v['remasking'] == 'wino' for v in variants.values())
     if args.model_family == 'dream':
-        if uses_wino:
-            raise ValueError('WINO needs a custom attention mask and is not ported to Dream.')
         model = load_dream_model(args.model)
         mask_id, end_ids = DREAM_MASK_ID, set(DREAM_END_IDS)
     else:
@@ -245,9 +243,12 @@ def main():
         decoder = {'hierarchy': generate_hierarchy,
                    'confidence_pivot_v2': generate_confidence_pivot_v2,
                    'wino': generate_wino}.get(remasking, generate)
+        target = model
+        if decoder is generate_wino and args.model_family == 'dream':
+            target, kwargs['dream'] = model.model, True  # raw Dream model; shadow-slot shift handled inside
         if decoder is generate:
             kwargs['remasking'] = remasking
-        return decoder(model, encoded['input_ids'],
+        return decoder(target, encoded['input_ids'],
                        attention_mask=encoded['attention_mask'] if args.model_family == 'llada' else None,
                        mask_id=mask_id,
                        gen_length=args.gen_length, block_length=args.block_length, steps=args.steps,

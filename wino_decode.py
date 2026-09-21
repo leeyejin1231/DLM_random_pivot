@@ -11,6 +11,12 @@ token was accepted, revokes committed tokens whose back-confidence < threshold_b
 The shadow block needs a 4-D boolean attention mask and explicit position ids, which the
 Hugging Face LLaDA modeling does not accept, so load_model() builds the model with WINO's
 own modeling_llada.py (same weights, no KV cache). Batch size 1 only, as in the original.
+
+dream=True adapts the trick to Dream, which predicts position i from the hidden state at
+i-1 (its sampler shifts logits right by one). Shadow slot k therefore takes position id
+b0+k-1 and is forbidden to attend to block column b0+k, so its *unshifted* logits are the
+leave-one-out prediction of block token b0+k; the main sequence uses shifted logits as
+usual. Pass the raw Dream model (not DreamForwardAdapter), mask_id=151666.
 """
 import sys
 from pathlib import Path
@@ -34,7 +40,8 @@ def load_model(path, device='cuda'):
 
 @torch.no_grad()
 def generate(model, prompt, attention_mask=None, gen_length=128, block_length=32, temperature=0.,
-             mask_id=126336, threshold=0.6, threshold_back=0.9, return_stats=False, **unused):
+             mask_id=126336, threshold=0.6, threshold_back=0.9, return_stats=False, dream=False,
+             **unused):
     """Verbatim WINO decoding with per-step accounting; unused absorbs steps/cfg_scale."""
     if unused.get('cfg_scale', 0):
         raise NotImplementedError('CFG is not part of the WINO baseline.')
@@ -54,8 +61,11 @@ def generate(model, prompt, attention_mask=None, gen_length=128, block_length=32
         mask_index_block[:, b1:] = False
         unmask_index_block = torch.full_like(mask_index_block, False)
         unmask_index_block[:, -block_length:] = ~mask_index_block[:, b0:b1]
+        shadow_offset = -1 if dream else 0
         position_ids = torch.cat([torch.arange(P + gen_length, device=device),
-                                  torch.arange(b0, b1, device=device)])
+                                  torch.arange(b0 + shadow_offset, b1 + shadow_offset, device=device)])
+        if dream:
+            position_ids = position_ids.unsqueeze(0)
         attn = torch.ones(1, 1, x_block.shape[1], x_block.shape[1], dtype=torch.bool, device=device)
         attn[:, :, :, -block_length:] = False
         attn[:, :, -block_length:, -block_length:] = True
@@ -64,6 +74,10 @@ def generate(model, prompt, attention_mask=None, gen_length=128, block_length=32
         while mask_index_block.any():
             max_accept = min(max(int(mask_index_block.sum()) * 7 // 10, 5), 20)
             logits = model(x_block, attention_mask=attn, position_ids=position_ids).logits
+            if dream:
+                # Main sequence: Dream's right shift. Shadow slots already predict b0+k directly.
+                main = P + gen_length
+                logits = torch.cat([logits[:, :1], logits[:, :main - 1], logits[:, main:]], dim=1)
             x0 = torch.argmax(add_gumbel_noise(logits, temperature=temperature), dim=-1)
             shift_left = torch.zeros_like(unmask_index_block)
             shift_left[:, b0:b1] = unmask_index_block[:, -block_length:]
