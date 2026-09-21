@@ -35,6 +35,7 @@ from decode import generate
 from hierarchy_decode import generate_hierarchy
 from decode_confidence_v2 import generate as generate_confidence_pivot_v2
 from wino_decode import generate as generate_wino, load_model as load_wino_model
+from dream_adapter import load_model as load_dream_model, MASK_ID as DREAM_MASK_ID, END_IDS as DREAM_END_IDS
 
 
 # ----------------------------------------------------------------------------- math500
@@ -293,6 +294,8 @@ def main():
     parser.add_argument('--exec-timeout', type=float, default=10.0)
     parser.add_argument('--limit', type=int, default=None, help='Evaluate only the first N tasks (debug)')
     parser.add_argument('--shard', default=None, help='k/n: evaluate indices with index %% n == k')
+    parser.add_argument('--model-family', choices=('llada', 'dream'), default='llada',
+                        help='dream: Dream-v0-Instruct-7B via dream_adapter (shifted logits, full attention)')
     parser.add_argument('--variant-config', required=True,
                         help='JSON mapping experiment labels to generate keyword arguments')
     args = parser.parse_args()
@@ -317,6 +320,7 @@ def main():
         'model_revision': Path(args.model).name,
         'num_tasks': len(indices), 'batch_size': 1, 'num_fewshot': 0,
         'variants': variants,
+        **({'model_family': args.model_family} if args.model_family != 'llada' else {}),
         'temperature': 0, 'cfg_scale': 0, 'dtype': 'bfloat16',
         'gpu': torch.cuda.get_device_name(0),
         'torch': torch.__version__, 'transformers': transformers.__version__,
@@ -351,16 +355,23 @@ def main():
         return
     print(f'Loading {args.model} on {config["gpu"]}', flush=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True, local_files_only=True)
-    if any(v['remasking'] == 'wino' for v in variants.values()):
-        model = load_wino_model(args.model)
+    uses_wino = any(v['remasking'] == 'wino' for v in variants.values())
+    if args.model_family == 'dream':
+        if uses_wino:
+            raise ValueError('WINO needs a custom attention mask and is not ported to Dream.')
+        model = load_dream_model(args.model)
+        mask_id, end_ids = DREAM_MASK_ID, set(DREAM_END_IDS)
     else:
-        model = AutoModel.from_pretrained(args.model, trust_remote_code=True,
-                                        local_files_only=True, torch_dtype=torch.bfloat16).to('cuda').eval()
+        if uses_wino:
+            model = load_wino_model(args.model)
+        else:
+            model = AutoModel.from_pretrained(args.model, trust_remote_code=True,
+                                            local_files_only=True, torch_dtype=torch.bfloat16).to('cuda').eval()
+        mask_id, end_ids = 126336, {126081, 126348}
     eos = tokenizer.eos_token_id
-    end_ids = {126081, 126348}
     if eos is not None:
         end_ids.add(eos)
-    special_ids = set(tokenizer.all_special_ids) | end_ids | {126336}
+    special_ids = set(tokenizer.all_special_ids) | end_ids | {mask_id}
 
     def encode(question):
         messages = [{'role': 'user', 'content': question + task['suffix']}]
@@ -375,7 +386,9 @@ def main():
                    'wino': generate_wino}.get(remasking, generate)
         if decoder is generate:
             kwargs['remasking'] = remasking
-        return decoder(model, encoded['input_ids'], attention_mask=encoded['attention_mask'],
+        return decoder(model, encoded['input_ids'],
+                       attention_mask=encoded['attention_mask'] if args.model_family == 'llada' else None,
+                       mask_id=mask_id,
                        gen_length=args.gen_length, block_length=args.block_length, steps=args.steps,
                        temperature=0, cfg_scale=0, return_stats=True, **kwargs)
 
@@ -415,10 +428,10 @@ def main():
                     'generated_ids': generated, 'prompt_tokens': encoded['input_ids'].shape[1],
                     'answer_tokens': sum(token not in special_ids for token in generated[:end]),
                     'unmasked_tokens': sum(counts), 'unmasked_per_step': counts,
-                    'final_unmasked_tokens': sum(token != 126336 for token in generated),
+                    'final_unmasked_tokens': sum(token != mask_id for token in generated),
                     'decoder_stats': stats,
                     'forward_steps': stats['forward_steps'], 'decode_seconds': elapsed,
-                    'residual_mask_tokens': generated.count(126336),
+                    'residual_mask_tokens': generated.count(mask_id),
                     'peak_allocated_gib': torch.cuda.max_memory_allocated() / 2**30,
                 }
                 if args.task == 'math500':
