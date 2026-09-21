@@ -26,11 +26,14 @@ _DIAGNOSTICS = ('candidates', 'deferred', 'fallback', 'bulk_intervals', 'bulk_to
 
 
 def select_pivots(confidence, intervals, confidence_threshold, small_interval_size=2,
-                  pivots_per_interval=1):
+                  pivots_per_interval=1, nonadjacent_pivots=False):
     """Complete existing small intervals and select pivots per eligible large one.
 
     Each large interval commits up to pivots_per_interval distinct positions,
     sampled uniformly without replacement from its above-threshold candidates.
+    With nonadjacent_pivots, candidates are visited in that random order and a
+    candidate is skipped when it neighbours an already chosen pivot, so no two
+    pivots of one interval are committed side by side from the same forward.
 
     confidence: (batch, block_length) predicted-token probabilities.
     intervals: per-sample lists of half-open, block-relative masked intervals.
@@ -64,8 +67,17 @@ def select_pivots(confidence, intervals, confidence_threshold, small_interval_si
                 bulk_tokens += end - start
             elif eligible.numel():
                 count = min(pivots_per_interval, eligible.numel())
-                choice = torch.randperm(eligible.numel(), device='cpu')[:count]
-                pivots[interval_index] = sorted((start + eligible[choice]).tolist())
+                order = torch.randperm(eligible.numel(), device='cpu')
+                if nonadjacent_pivots:
+                    chosen = []
+                    for candidate in eligible[order].tolist():
+                        if all(abs(candidate - other) > 1 for other in chosen):
+                            chosen.append(candidate)
+                            if len(chosen) == count:
+                                break
+                else:
+                    chosen = eligible[order[:count]].tolist()
+                pivots[interval_index] = sorted(start + offset for offset in chosen)
 
         fallback = bool(sample_intervals) and not completed and not pivots
         if fallback:
@@ -112,7 +124,8 @@ def select_pivots(confidence, intervals, confidence_threshold, small_interval_si
 def generate(model, prompt, attention_mask=None, steps=None, gen_length=128,
              block_length=32, temperature=0., cfg_scale=0., mask_id=126336,
              confidence_threshold=0.8, logits_eos_inf=False, eos_token_id=126081,
-             return_stats=False, small_interval_size=2, pivots_per_interval=1):
+             return_stats=False, small_interval_size=2, pivots_per_interval=1,
+             nonadjacent_pivots=False):
     """Generate with confidence-filtered random pivots and small-interval completion.
 
     Blocks are processed sequentially while the model attends to the full
@@ -121,7 +134,8 @@ def generate(model, prompt, attention_mask=None, steps=None, gen_length=128,
         even below confidence_threshold.
       * Larger intervals commit up to pivots_per_interval uniformly sampled
         above-threshold pivots (without replacement), or wait when there is
-        no candidate.
+        no candidate. nonadjacent_pivots forbids two pivots of the same
+        interval at neighbouring positions; bulk completion is unaffected.
       * Newly created children become eligible only on the next forward.
     When a sample would otherwise commit nothing, its most confident masked
     token is committed as a fallback, even below the confidence threshold.
@@ -153,6 +167,8 @@ def generate(model, prompt, attention_mask=None, steps=None, gen_length=128,
     if (isinstance(pivots_per_interval, bool)
             or not isinstance(pivots_per_interval, int) or pivots_per_interval < 1):
         raise ValueError('pivots_per_interval must be a positive integer.')
+    if not isinstance(nonadjacent_pivots, bool):
+        raise ValueError('nonadjacent_pivots must be a bool.')
     if gen_length <= 0 or block_length <= 0 or gen_length % block_length:
         raise ValueError('Positive gen_length must be divisible by positive block_length.')
     if prompt.ndim != 2 or prompt.shape[0] == 0:
@@ -211,7 +227,7 @@ def generate(model, prompt, attention_mask=None, steps=None, gen_length=128,
             )
             selected, intervals, diagnostics = select_pivots(
                 confidence, intervals, confidence_threshold, small_interval_size,
-                pivots_per_interval)
+                pivots_per_interval, nonadjacent_pivots)
             block = x[:, block_start:block_end]
             block[selected] = predictions[selected]
             forward_steps += 1
@@ -232,6 +248,7 @@ def generate(model, prompt, attention_mask=None, steps=None, gen_length=128,
         'confidence_threshold': confidence_threshold,
         'small_interval_size': small_interval_size,
         'pivots_per_interval': pivots_per_interval,
+        'nonadjacent_pivots': nonadjacent_pivots,
         'capped_incomplete': False,
     }
     stats.update({f'{key}_per_step': values for key, values in diagnostics_per_step.items()})

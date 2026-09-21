@@ -33,7 +33,7 @@ from transformers import AutoModel, AutoTokenizer
 
 from decode import generate
 from hierarchy_decode import generate_hierarchy
-from decode_confidence import generate as generate_confidence_pivot
+from contents.DLM_random_pivot.old.decode_confidence import generate as generate_confidence_pivot
 from decode_confidence_v2 import generate as generate_confidence_pivot_v2
 
 

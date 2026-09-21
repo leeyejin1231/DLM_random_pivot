@@ -24,6 +24,7 @@ from transformers import AutoModel, AutoTokenizer
 
 from decode import generate
 from hierarchy_decode import generate_hierarchy
+from decode_confidence_v2 import generate as generate_confidence_pivot_v2
 
 
 MODES = ('low_confidence', 'random_pivot')
@@ -158,7 +159,7 @@ def main():
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA is unavailable; this benchmark requires a GPU.')
-    out_dir = Path(args.output)
+    out_dir = Path(args.output).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     dataset = Dataset.from_file(args.dataset)
     indices = list(range(len(dataset)))[:args.limit]
@@ -181,6 +182,7 @@ def main():
         'prompt_template': prompt_template,
         'decode_sha256': hashlib.sha256(Path(__file__).with_name('decode.py').read_bytes()).hexdigest(),
         'hierarchy_decode_sha256': hashlib.sha256(Path(__file__).with_name('hierarchy_decode.py').read_bytes()).hexdigest(),
+        'decode_confidence_v2_sha256': hashlib.sha256(Path(__file__).with_name('decode_confidence_v2.py').read_bytes()).hexdigest(),
         'eval_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         'metrics': {
             'pass_at_1': 'One greedy sample per task; prompt + extracted code + test + check(entry_point) executed in a subprocess with timeout.',
@@ -196,7 +198,7 @@ def main():
     write_json(config_path, config)
     source_dir = out_dir / 'source'
     source_dir.mkdir(exist_ok=True)
-    for filename in ('decode.py', 'hierarchy_decode.py', Path(__file__).name):
+    for filename in ('decode.py', 'hierarchy_decode.py', 'decode_confidence_v2.py', Path(__file__).name):
         (source_dir / filename).write_bytes(Path(__file__).with_name(filename).read_bytes())
     workdir = out_dir / 'exec_tmp'
     workdir.mkdir(exist_ok=True)
@@ -223,9 +225,11 @@ def main():
 
     def run(encoded, mode):
         kwargs = dict(variants[mode])
-        decoder = generate_hierarchy if kwargs.pop('remasking') == 'hierarchy' else generate
+        remasking = kwargs.pop('remasking')
+        decoder = {'hierarchy': generate_hierarchy,
+                   'confidence_pivot_v2': generate_confidence_pivot_v2}.get(remasking, generate)
         if decoder is generate:
-            kwargs['remasking'] = variants[mode]['remasking']
+            kwargs['remasking'] = remasking
         return decoder(model, encoded['input_ids'], attention_mask=encoded['attention_mask'],
                        gen_length=args.gen_length, block_length=args.block_length, steps=args.steps,
                        temperature=0, cfg_scale=0, return_stats=True, **kwargs)
