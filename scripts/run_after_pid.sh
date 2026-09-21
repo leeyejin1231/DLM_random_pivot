@@ -6,8 +6,8 @@ waitpid=$1; gpu=$2; shift 2
 while [ "$waitpid" != 0 ] && kill -0 $waitpid 2>/dev/null; do sleep 30; done
 for job in "$@"; do
   case $job in
-    he:*)    ./run_gsm8k_he.sh $gpu ${job#he:} humaneval;;
-    gsm:*)   ./run_gsm8k_he.sh $gpu ${job#gsm:} gsm8k;;
-    bench:*) ./run_bench_queue.sh $gpu ${job#bench:};;
+    he:*)    "$(dirname "$0")"/run_gsm8k_he.sh $gpu ${job#he:} humaneval;;
+    gsm:*)   "$(dirname "$0")"/run_gsm8k_he.sh $gpu ${job#gsm:} gsm8k;;
+    bench:*) "$(dirname "$0")"/run_bench_queue.sh $gpu ${job#bench:};;
   esac
 done

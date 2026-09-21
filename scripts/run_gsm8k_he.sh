@@ -11,12 +11,12 @@ for task in "$@"; do
     CUDA_VISIBLE_DEVICES=$gpu $PY -u eval_gsm8k.py --model $MODEL \
       --dataset /scratch/ssgyejin/datasets/openai___gsm8k/main/0.0.0/740312add88f781978c0658806c59bc2815b9866/gsm8k-test.arrow \
       --output results/gsm8k_full_g128_b32_$cfg --num-samples 1319 --gen-length 128 --block-length 32 \
-      --variant-config confpivot_v2_$cfg.json > logs/gsm8k_full_$cfg.out 2>&1
+      --variant-config $([ "$cfg" = wino ] && echo wino_gsm8k.json || echo confpivot_v2_$cfg.json) > logs/gsm8k_full_$cfg.out 2>&1
   else
     CUDA_VISIBLE_DEVICES=$gpu $PY -u eval_humaneval.py --model $MODEL \
       --dataset /scratch/ssgyejin/datasets/openai_humaneval/openai_humaneval/0.0.0/7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544/openai_humaneval-test.arrow \
       --output results/humaneval_g256_b32_$cfg --gen-length 256 --block-length 32 \
-      --variant-config confpivot_v2_$cfg.json > logs/humaneval_g256_$cfg.out 2>&1
+      --variant-config $([ "$cfg" = wino ] && echo wino_humaneval.json || echo confpivot_v2_$cfg.json) > logs/humaneval_g256_$cfg.out 2>&1
   fi
   echo "=== $(date) END $task:$cfg exit=$?" >> logs/bench_queue_gpu${gpu}.log
 done

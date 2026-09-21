@@ -17,6 +17,7 @@ for job in "$@"; do
     vanilla) cfg=vanilla_variant.json;;
     hier)    cfg=hierarchy_r03_variant.json;;
     ours)    cfg=confpivot_v2_t075_p32_s2.json;;
+    wino)    cfg=wino_${task}.json;;
     *)       cfg=confpivot_v2_${method}.json;;
   esac
   out=results/${task}_g${gen}_b32_${method}; extra=""
